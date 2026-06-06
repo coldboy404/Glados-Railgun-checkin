@@ -31,6 +31,7 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
             status="签到失败",
             points="0",
             days="30 天",
+            points_total="30 积分",
             code=checkin.CheckinStatus.FAILURE,
         ),
         checkin.CheckinResult(
@@ -40,6 +41,7 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
             status="签到成功",
             points="5",
             days="14 天",
+            points_total="112 积分",
             code=checkin.CheckinStatus.SUCCESS,
         ),
         checkin.CheckinResult(
@@ -49,6 +51,7 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
             status="已签到",
             points="0",
             days="14 天",
+            points_total="89 积分",
             code=checkin.CheckinStatus.REPEAT,
         ),
         # Same cookie on the fallback domain must not create an extra notification row.
@@ -59,6 +62,7 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
             status="签到失败",
             points="0",
             days="None 天",
+            points_total="None 积分",
             code=checkin.CheckinStatus.FAILURE,
         ),
     ]
@@ -68,9 +72,9 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
     assert title == "GLaDOS 签到完成 ✅1 ❌1 🔁1"
     assert content == "\n".join(
         [
-            "1. wildpunchiang724@gmail.com | ❌ 签到失败 | P:- | 剩余:30 天",
-            "2. 404coldboy@gmail.com | ✅ 签到成功 | P:5 | 剩余:14 天",
-            "3. buwenjiang724@gmail.com | 🔁 已签到 | P:- | 剩余:14 天",
+            "1. wildpunchiang724@gmail.com | ❌ 签到失败 | P:- | 剩余积分:30 | 剩余:30 天",
+            "2. 404coldboy@gmail.com | ✅ 签到成功 | P:5 | 剩余积分:112 | 剩余:14 天",
+            "3. buwenjiang724@gmail.com | 🔁 已签到 | P:- | 剩余积分:89 | 剩余:14 天",
         ]
     )
     assert log_content == content
@@ -144,3 +148,39 @@ def test_config_still_loads_verbose_env(monkeypatch):
     config = checkin.Config()
 
     assert config.verbose is True
+
+
+def test_checkin_on_domain_uses_status_email_and_total_points(monkeypatch):
+    checkin = load_checkin(monkeypatch)
+    config = types.SimpleNamespace(verbose=False, EXCHANGE_PLANS={"plan500": 500}, exchange_plan="plan500")
+
+    class FakeAPI:
+        def __init__(self, domain, cookie_index, verbose=False):
+            self.domain = domain
+            self.cookie_index = cookie_index
+            self.verbose = verbose
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get_status(self, cookie):
+            return "28 天", 0, "from-status@example.com"
+
+        def checkin(self, cookie):
+            return {"status": "签到成功", "points": "5", "code": checkin.CheckinStatus.SUCCESS}
+
+        def get_points(self, cookie):
+            return "123 积分", 123
+
+        def exchange(self, cookie, plan, required_points):
+            return "兑换失败: 积分不足"
+
+    monkeypatch.setattr(checkin, "API", FakeAPI)
+
+    result = checkin.Checker(config)._checkin_on_domain("cookie", 1, "glados.cloud")
+
+    assert result.account == "from-status@example.com"
+    assert result.points_total == "123 积分"

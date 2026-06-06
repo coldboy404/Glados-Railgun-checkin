@@ -80,7 +80,7 @@ def log_method(func):
 
             DEFAULT_ERRORS = {
                 "checkin": {"status": "签到失败", "points": "0", "message": ""},
-                "get_status": ("None 天", -2),
+                "get_status": ("None 天", -2, ""),
                 "get_points": ("None 积分", 0),
                 "exchange": "",
             }
@@ -359,8 +359,8 @@ class API:
         return result
 
     @log_method
-    def get_status(self, cookies: str) -> Tuple[str, int]:
-        """获取状态"""
+    def get_status(self, cookies: str) -> Tuple[str, int, str]:
+        """获取状态，返回剩余天数、状态码和账号邮箱。"""
 
         url = self._get_full_url(self.STATUS_URL)
         response = self._make_request(url, "GET", cookies=cookies)
@@ -368,18 +368,20 @@ class API:
         if response:
             data = response.json()
             code = data.get("code", -2)
-            left_days = data.get("data", {}).get("leftDays", None)
+            status_data = data.get("data", {}) or {}
+            left_days = status_data.get("leftDays", None)
+            email = status_data.get("email", "") or ""
 
             if left_days is not None:
                 left_days_int = int(float(left_days))
-                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, leftDays : {left_days_int} 天}}")
-                return f"{left_days_int} 天", code
+                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, email : {email or 'unknown'}, leftDays : {left_days_int} 天}}")
+                return f"{left_days_int} 天", code, email
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}", force=True)
-                return "None 天", code
+                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, email : {email or 'unknown'}, leftDays : {left_days} 天}}", force=True)
+                return "None 天", code, email
         else:
             self._log("warning", LogEmoji.WARNING, "获取状态失败", force=True)
-            return "None 天", -2
+            return "None 天", -2, ""
 
     @log_method
     def get_points(self, cookies: str) -> Tuple[str, int]:
@@ -541,7 +543,8 @@ class Checker:
                 logger.info(f"{LogEmoji.INFO} ----- 任务 {task_idx}/{total_tasks}: {LogEmoji.COOKIE}[{cookie_idx}] on {LogEmoji.DOMAIN}[{domain}] -----")
 
                 result = self._checkin_on_domain(cookie, cookie_idx, domain)
-                result.account = self._account_name(cookie_idx)
+                if not result.account:
+                    result.account = self._account_name(cookie_idx)
                 final_result = self._pick_better_result(final_result, result)
 
                 result_message = f"结果: {result.status}"
@@ -582,8 +585,11 @@ class Checker:
         with API(domain, cookie_idx, verbose=self.config.verbose) as api:
             # 1. 获取状态
             self._log(cookie_idx, domain, LogEmoji.STATUS, "查询剩余天数")
-            days_str, status_code = api.get_status(cookie)
+            status_result = api.get_status(cookie)
+            days_str, status_code = status_result[:2]
+            status_email = status_result[2] if len(status_result) > 2 else ""
             result.days = days_str
+            result.account = status_email
 
             # 2. 签到
             self._log(cookie_idx, domain, LogEmoji.CHECKIN, "执行签到")
@@ -629,7 +635,8 @@ class Checker:
             status = self._display_status(res["code"], str(res["status"]))
             points = self._display_points(res["code"], str(res["points"]))
             account = str(res.get("account") or f"Cookie {res['cookie_index']}")
-            line = f"{i}. {account} | {emoji} {status} | P:{points} | 剩余:{res['days']}"
+            remaining_points = self._display_total_points(str(res.get("points_total", "")))
+            line = f"{i}. {account} | {emoji} {status} | P:{points} | 剩余积分:{remaining_points} | 剩余:{res['days']}"
             lines.append(line)
 
         content = "\n".join(lines)
@@ -662,6 +669,12 @@ class Checker:
         if code != CheckinStatus.SUCCESS or points in {"", "0", "None", "None 积分"}:
             return "-"
         return points.replace(" 积分", "")
+
+    @staticmethod
+    def _display_total_points(points_total: str) -> str:
+        if points_total in {"", "None", "None 积分"}:
+            return "-"
+        return points_total.replace(" 积分", "")
 
 
 # 初始化日志
