@@ -5,7 +5,10 @@ import logging
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
-from pypushdeer import PushDeer
+try:
+    from pypushdeer import PushDeer
+except ImportError:  # Telegram-only users do not need pypushdeer installed locally.
+    PushDeer = None
 from logging_config import init_logger
 
 
@@ -95,6 +98,8 @@ class Config:
     """应用配置"""
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
+    ENV_TG_BOT_TOKEN = "TG_BOT_TOKEN"
+    ENV_TG_CHAT_ID = "TG_CHAT_ID"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
@@ -117,6 +122,8 @@ class Config:
 
     def __init__(self):
         self.push_key: str = ""
+        self.tg_bot_token: str = ""
+        self.tg_chat_id: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
@@ -125,6 +132,8 @@ class Config:
     def _load_config(self) -> None:
         """加载配置"""
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
+        tg_bot_token_env: Optional[str] = os.environ.get(self.ENV_TG_BOT_TOKEN)
+        tg_chat_id_env: Optional[str] = os.environ.get(self.ENV_TG_CHAT_ID)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
@@ -134,6 +143,14 @@ class Config:
             self.push_key = ""
         else:
             self.push_key = push_key_env
+
+        if not tg_bot_token_env or not tg_chat_id_env:
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_TG_BOT_TOKEN}' 或 '{self.ENV_TG_CHAT_ID}' 未完整设置。")
+            self.tg_bot_token = ""
+            self.tg_chat_id = ""
+        else:
+            self.tg_bot_token = tg_bot_token_env
+            self.tg_chat_id = tg_chat_id_env
 
         if not raw_cookies_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
@@ -156,6 +173,7 @@ class Config:
 
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
+        logger.info(f"{LogEmoji.INFO} 当前 Telegram Bot {'已设置' if (tg_bot_token_env and tg_chat_id_env) else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
 
         if verbose_env is not None:
@@ -393,23 +411,65 @@ class CheckinResult:
 class PushService:
     """推送服务"""
 
+    TELEGRAM_API_TIMEOUT = 10
+    TELEGRAM_MAX_LENGTH = 4000
+
     def __init__(self, config: Config):
         self.config = config
 
-    def send(self, title: str, content: str) -> bool:
-        """发送推送"""
-        if not self.config.push_key:
-            logger.info(f"{LogEmoji.WARNING} 未设置推送密钥，跳过推送通知。")
+    def _send_pushdeer(self, title: str, content: str) -> bool:
+        """发送 PushDeer 推送"""
+        if not getattr(self.config, "push_key", ""):
+            logger.info(f"{LogEmoji.WARNING} 未设置 PushDeer 推送密钥，跳过 PushDeer 通知。")
+            return False
+
+        if PushDeer is None:
+            logger.error(f"{LogEmoji.ERROR} 未安装 pypushdeer，无法发送 PushDeer 通知。")
             return False
 
         try:
             pushdeer = PushDeer(pushkey=self.config.push_key)
             pushdeer.send_text(title, desp=content)
-            logger.info(f"{LogEmoji.SUCCESS} 推送通知发送成功。")
+            logger.info(f"{LogEmoji.SUCCESS} PushDeer 推送通知发送成功。")
             return True
         except Exception as e:
-            logger.error(f"{LogEmoji.ERROR} 发送推送通知失败: {e}")
+            logger.error(f"{LogEmoji.ERROR} PushDeer 推送通知失败: {e}")
             return False
+
+    def _send_telegram(self, title: str, content: str) -> bool:
+        """发送 Telegram Bot 推送"""
+        bot_token = getattr(self.config, "tg_bot_token", "")
+        chat_id = getattr(self.config, "tg_chat_id", "")
+        if not bot_token or not chat_id:
+            logger.info(f"{LogEmoji.WARNING} 未设置 Telegram Bot Token 或 Chat ID，跳过 Telegram 通知。")
+            return False
+
+        text = f"{title}\n\n{content}"
+        if len(text) > self.TELEGRAM_MAX_LENGTH:
+            text = text[: self.TELEGRAM_MAX_LENGTH - 10] + "..."
+
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=self.TELEGRAM_API_TIMEOUT,
+            )
+            response_data = response.json() if response.text else {}
+            if response.status_code == 200 and response_data.get("ok"):
+                logger.info(f"{LogEmoji.SUCCESS} Telegram 推送通知发送成功。")
+                return True
+            logger.error(f"{LogEmoji.ERROR} Telegram 推送通知失败: HTTP {response.status_code} {response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"{LogEmoji.ERROR} Telegram 推送通知失败: {e}")
+            return False
+
+    def send(self, title: str, content: str) -> bool:
+        """发送已配置的推送通知。支持 PushDeer 和 Telegram Bot，可同时启用。"""
+        results = []
+        results.append(self._send_pushdeer(title, content))
+        results.append(self._send_telegram(title, content))
+        return any(results)
 
 
 class Checker:

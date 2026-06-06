@@ -44,7 +44,12 @@
 
 4. 手机推送（非必须）
 
-- 添加1个`repository secret`，命名为`PUSHDEER_SENDKEY`，其值对应 PushDeer key: ([获取地址](https://www.pushdeer.com/product.html))。
+- PushDeer：添加1个 `repository secret`，命名为 `PUSHDEER_SENDKEY`，其值对应 PushDeer key: ([获取地址](https://www.pushdeer.com/product.html))。
+- Telegram Bot：添加2个 `repository secret`：
+  - `TG_BOT_TOKEN`：Telegram Bot Token，例如 `123456:ABC-xxx`
+  - `TG_CHAT_ID`：接收消息的 Chat ID，例如 `123456789`
+
+> PushDeer 和 Telegram Bot 可同时配置；如果只想用 Telegram，只配置 `TG_BOT_TOKEN` 和 `TG_CHAT_ID` 即可。
 
 ### **star**自己的仓库
 
@@ -64,6 +69,7 @@
 
 - **2026-01**: 重构代码，添加log输出方便定位，支持新版网址，支持配置积分兑换策略。
 - **2026-04**: 优化代码逻辑，优化日志输出，支持[新版域名](https://railgun.info) ，在 GLADOS_COOKIES 中添加新版域名下的 cookies 即可使用。
+- **2026-06**: 添加 Telegram Bot 推送支持，可通过 `TG_BOT_TOKEN` 和 `TG_CHAT_ID` 配置。
 
 
 ## 问题排查与定位
