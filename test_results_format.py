@@ -72,9 +72,9 @@ def test_format_results_outputs_one_row_per_cookie_with_requested_summary(monkey
     assert title == "GLaDOS 签到完成 ✅1 ❌1 🔁1"
     assert content == "\n".join(
         [
-            "1. wildpunchiang724@gmail.com | ❌ 签到失败 | P:- | 剩余积分:30 | 剩余:30 天",
-            "2. 404coldboy@gmail.com | ✅ 签到成功 | P:5 | 剩余积分:112 | 剩余:14 天",
-            "3. buwenjiang724@gmail.com | 🔁 已签到 | P:- | 剩余积分:89 | 剩余:14 天",
+            "1. wildpunchiang724@gmail.com | ❌ 签到失败 | 本次:- | 剩余积分:30 | 剩余:30 天",
+            "2. 404coldboy@gmail.com | ✅ 签到成功 | 本次:+5 | 剩余积分:112 | 剩余:14 天",
+            "3. buwenjiang724@gmail.com | 🔁 已签到 | 本次:- | 剩余积分:89 | 剩余:14 天",
         ]
     )
     assert log_content == content

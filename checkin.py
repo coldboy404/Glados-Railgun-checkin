@@ -636,7 +636,7 @@ class Checker:
             points = self._display_points(res["code"], str(res["points"]))
             account = str(res.get("account") or f"Cookie {res['cookie_index']}")
             remaining_points = self._display_total_points(str(res.get("points_total", "")))
-            line = f"{i}. {account} | {emoji} {status} | P:{points} | 剩余积分:{remaining_points} | 剩余:{res['days']}"
+            line = f"{i}. {account} | {emoji} {status} | 本次:{points} | 剩余积分:{remaining_points} | 剩余:{res['days']}"
             lines.append(line)
 
         content = "\n".join(lines)
@@ -668,7 +668,8 @@ class Checker:
     def _display_points(code: CheckinStatus, points: str) -> str:
         if code != CheckinStatus.SUCCESS or points in {"", "0", "None", "None 积分"}:
             return "-"
-        return points.replace(" 积分", "")
+        clean_points = points.replace(" 积分", "")
+        return clean_points if clean_points.startswith("+") else f"+{clean_points}"
 
     @staticmethod
     def _display_total_points(points_total: str) -> str:
