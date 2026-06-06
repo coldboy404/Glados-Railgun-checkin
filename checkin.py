@@ -2,6 +2,9 @@ import requests
 import json
 import os
 import logging
+import base64
+import re
+from urllib.parse import unquote
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
@@ -125,6 +128,7 @@ class Config:
         self.tg_bot_token: str = ""
         self.tg_chat_id: str = ""
         self.cookies_list: List[str] = []
+        self.account_names: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
         self._load_config()
@@ -155,10 +159,12 @@ class Config:
         if not raw_cookies_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
             self.cookies_list = []
+            self.account_names = []
         else:
             self.cookies_list = [cookie.strip() for cookie in raw_cookies_env.split("&") if cookie.strip()]
             if not self.cookies_list:
                 raise ValueError(f"环境变量 '{self.ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。")
+            self.account_names = [self._extract_account_name(cookie, index) for index, cookie in enumerate(self.cookies_list, 1)]
 
         if not exchange_plan_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
@@ -186,6 +192,37 @@ class Config:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
 
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+
+
+    @staticmethod
+    def _extract_account_name(cookie: str, index: int) -> str:
+        """尽量从 Cookie 中提取账号邮箱，失败时回退到 Cookie 序号。"""
+        candidates = [cookie]
+
+        decoded = cookie
+        for _ in range(2):
+            next_decoded = unquote(decoded)
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
+            candidates.append(decoded)
+
+        for value in re.findall(r"koa:sess=([^;]+)", decoded):
+            padded = value + "=" * (-len(value) % 4)
+            for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+                try:
+                    candidates.append(decoder(padded).decode("utf-8", errors="ignore"))
+                    break
+                except Exception:
+                    continue
+
+        for candidate in candidates:
+            match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", candidate)
+            if match:
+                return match.group(0)
+
+        return f"Cookie {index}"
+
 
 
 class API:
@@ -304,7 +341,7 @@ class API:
             elif code == CheckinStatus.REPEAT.value:
                 self._log("info", LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", force=True)
                 result["code"] = CheckinStatus.REPEAT
-                result["status"] = "重复签到"
+                result["status"] = "已签到"
                 result["points"] = "0"
                 result["message"] = message
             else:
@@ -396,6 +433,7 @@ class CheckinResult:
 
     cookie_index: int
     domain: str
+    account: str = ""
     status: str = "签到失败"
     points: str = "0"
     days: str = "None"
@@ -486,31 +524,57 @@ class Checker:
             logger.info(f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {emoji} {message}")
 
     def checkin_all(self):
-        """执行所有签到任务"""
+        """执行所有签到任务。每个 Cookie 最终只保留一条结果，域名仅作故障回退。"""
         cookie_count = len(self.config.cookies_list)
         domain_count = len(self.config.DOMAINS)
         total_tasks = cookie_count * domain_count
         task_idx = 0
 
-        logger.info(f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {domain_count} 个域名, 共 {total_tasks} 个任务")
+        logger.info(f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {domain_count} 个域名, 最多 {total_tasks} 个任务")
 
         for cookie_idx, cookie in enumerate(self.config.cookies_list, 1):
             logger.info(f"{LogEmoji.START} ========== 开始处理 Cookie {cookie_idx} ==========")
+            final_result = None
 
             for domain in self.config.DOMAINS:
                 task_idx += 1
                 logger.info(f"{LogEmoji.INFO} ----- 任务 {task_idx}/{total_tasks}: {LogEmoji.COOKIE}[{cookie_idx}] on {LogEmoji.DOMAIN}[{domain}] -----")
 
                 result = self._checkin_on_domain(cookie, cookie_idx, domain)
-                self.results.append(result)
+                result.account = self._account_name(cookie_idx)
+                final_result = self._pick_better_result(final_result, result)
 
                 result_message = f"结果: {result.status}"
                 if result.code == CheckinStatus.SUCCESS:
                     if self.config.verbose:
                         result_message = f"结果: {result.status}, 获得 {result.points} 积分, 剩余 {result.days}, 总 {result.points_total}, {result.exchange}"
                     self._log(cookie_idx, domain, LogEmoji.SUCCESS, result_message, force=True)
-                else:
-                    self._log(cookie_idx, domain, LogEmoji.WARNING, result_message, force=True)
+                    break
+                if result.code == CheckinStatus.REPEAT:
+                    self._log(cookie_idx, domain, LogEmoji.REPEAT, result_message, force=True)
+                    break
+
+                self._log(cookie_idx, domain, LogEmoji.WARNING, result_message, force=True)
+
+            if final_result is not None:
+                self.results.append(final_result)
+
+    def _account_name(self, cookie_idx: int) -> str:
+        account_names = getattr(self.config, "account_names", [])
+        if 0 <= cookie_idx - 1 < len(account_names):
+            return account_names[cookie_idx - 1]
+        return f"Cookie {cookie_idx}"
+
+    @staticmethod
+    def _pick_better_result(current: Optional[CheckinResult], candidate: CheckinResult) -> CheckinResult:
+        if current is None:
+            return candidate
+        rank = {CheckinStatus.SUCCESS: 3, CheckinStatus.REPEAT: 2, CheckinStatus.FAILURE: 1}
+        if rank.get(candidate.code, 0) > rank.get(current.code, 0):
+            return candidate
+        if candidate.code == current.code == CheckinStatus.FAILURE and current.days.startswith("None") and not candidate.days.startswith("None"):
+            return candidate
+        return current
 
     def _checkin_on_domain(self, cookie: str, cookie_idx: int, domain: str) -> CheckinResult:
         result = CheckinResult(cookie_idx, domain)
@@ -526,6 +590,7 @@ class Checker:
             checkin_result = api.checkin(cookie)
             result.status = checkin_result["status"]
             result.code = checkin_result.get("code", CheckinStatus.FAILURE)
+            result.points = str(checkin_result.get("points", "0"))
 
             # 3. 获取积分
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
@@ -549,30 +614,54 @@ class Checker:
         return [result.to_dict() for result in self.results]
 
     def format_results(self) -> Tuple[str, str, str]:
-        """格式化结果"""
-        results = self.get_results()
+        """格式化结果为一账号一行的推送模板。"""
+        results = self._collapse_results_by_cookie(self.results)
 
         success_count = sum(1 for r in results if r["code"] == CheckinStatus.SUCCESS)
         repeat_count = sum(1 for r in results if r["code"] == CheckinStatus.REPEAT)
         fail_count = sum(1 for r in results if r["code"] == CheckinStatus.FAILURE)
 
-        title = f"GLaDOS 签到, 成功{success_count}, 失败{fail_count}, 重复{repeat_count}"
+        title = f"GLaDOS 签到完成 ✅{success_count} ❌{fail_count} 🔁{repeat_count}"
 
-        send_content_lines = []
-        log_content_lines = []
+        lines = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
-            send_content_lines.append(line)
+            emoji = self._result_emoji(res["code"])
+            status = self._display_status(res["code"], str(res["status"]))
+            points = self._display_points(res["code"], str(res["points"]))
+            account = str(res.get("account") or f"Cookie {res['cookie_index']}")
+            line = f"{i}. {account} | {emoji} {status} | P:{points} | 剩余:{res['days']}"
+            lines.append(line)
 
-            if self.config.verbose:
-                log_line = line
-            else:
-                log_line = f"#{i} {res['status']}"
-            log_content_lines.append(log_line)
+        content = "\n".join(lines)
+        return title, content, content
 
-        content = "\n".join(send_content_lines)
-        log_content = "\n".join(log_content_lines)
-        return title, content, log_content
+    def _collapse_results_by_cookie(self, results: List[CheckinResult]) -> List[Dict[str, Union[str, CheckinStatus]]]:
+        collapsed: Dict[int, CheckinResult] = {}
+        for result in results:
+            collapsed[result.cookie_index] = self._pick_better_result(collapsed.get(result.cookie_index), result)
+        return [collapsed[index].to_dict() for index in sorted(collapsed)]
+
+    @staticmethod
+    def _result_emoji(code: CheckinStatus) -> str:
+        if code == CheckinStatus.SUCCESS:
+            return "✅"
+        if code == CheckinStatus.REPEAT:
+            return "🔁"
+        return "❌"
+
+    @staticmethod
+    def _display_status(code: CheckinStatus, status: str) -> str:
+        if code == CheckinStatus.SUCCESS:
+            return "签到成功"
+        if code == CheckinStatus.REPEAT:
+            return "已签到"
+        return "签到失败"
+
+    @staticmethod
+    def _display_points(code: CheckinStatus, points: str) -> str:
+        if code != CheckinStatus.SUCCESS or points in {"", "0", "None", "None 积分"}:
+            return "-"
+        return points.replace(" 积分", "")
 
 
 # 初始化日志
